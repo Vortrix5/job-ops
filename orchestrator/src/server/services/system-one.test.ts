@@ -19,23 +19,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("OpenRouter Jev client", () => {
-  it("sends a structured OpenRouter request and returns typed answers", async () => {
+describe("OpenRouter Jev decisions client", () => {
+  it("sends a decisions request and returns typed answers", async () => {
     process.env.OPENROUTER_API_KEY = "test-openrouter-key";
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                answers: {
-                  skills: { score: 3.5, confidence: 0.9 },
-                },
-              }),
-            },
-          },
-        ],
+        model: "typesafe/jev-1.13",
+        id: "decision-1",
+        answers: {
+          skills: { type: "score", score: 3.5, confidence: 0.9 },
+        },
+        usage: { input_tokens: 10, output_tokens: 1 },
       }),
     }) as typeof fetch;
 
@@ -53,7 +48,7 @@ describe("OpenRouter Jev client", () => {
 
     expect(result.answers.skills).toMatchObject({ score: 3.5 });
     expect(global.fetch).toHaveBeenCalledWith(
-      "https://openrouter.ai/api/v1/chat/completions",
+      "https://openrouter.ai/api/alpha/decisions",
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({
@@ -62,6 +57,12 @@ describe("OpenRouter Jev client", () => {
         body: expect.stringContaining('"model":"typesafe/jev-1.13"'),
       }),
     );
+    const body = JSON.parse(
+      vi.mocked(global.fetch).mock.calls[0][1]?.body as string,
+    );
+    expect(body.questions.skills.type).toBe("score");
+    expect(body.state).toEqual({ candidate: {}, job: {} });
+    expect(result.request_id).toBe("decision-1");
   });
 
   it("retries rate limits and gateway overloads", async () => {
@@ -83,13 +84,9 @@ describe("OpenRouter Jev client", () => {
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          choices: [
-            {
-              message: {
-                content: JSON.stringify({ answers: {} }),
-              },
-            },
-          ],
+          model: "typesafe/jev-1.13",
+          answers: {},
+          usage: { input_tokens: 0, output_tokens: 0 },
         }),
       }) as typeof fetch;
 

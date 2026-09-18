@@ -1,9 +1,11 @@
 import { logger } from "@infra/logger";
-import type { JsonSchemaDefinition } from "@server/services/llm/types";
-import { createConfiguredLlmService } from "@server/services/modelSelection";
+import { buildHeaders, joinUrl } from "@server/services/llm/utils/http";
+import { resolveLlmRuntimeSettings } from "@server/services/modelSelection";
 
 export const JEV_MODEL = "typesafe/jev-1.13";
-export const JEV_SCORING_VERSION = "openrouter-typesafe-jev-1.13-scoring-v1";
+export const JEV_SCORING_VERSION = "openrouter-typesafe-jev-1.13-decisions-v1";
+const DECISIONS_PATH = "/api/alpha/decisions";
+const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai";
 
 export type SystemOneQuestion =
   | {
@@ -67,59 +69,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-type OpenRouterJevResponse = {
-  answers: Record<string, { score: number; confidence: number }>;
-};
-
-const JEV_RESPONSE_SCHEMA: JsonSchemaDefinition = {
-  name: "jev_suitability_scores",
-  schema: {
-    type: "object",
-    properties: {
-      answers: {
-        type: "object",
-        properties: Object.fromEntries(
-          ["skills", "experience", "location", "domain", "preferences"].map(
-            (key) => [
-              key,
-              {
-                type: "object",
-                properties: {
-                  score: { type: "number", minimum: 0, maximum: 4 },
-                  confidence: { type: "number", minimum: 0, maximum: 1 },
-                },
-                required: ["score", "confidence"],
-                additionalProperties: false,
-              },
-            ],
-          ),
-        ),
-        required: ["skills", "experience", "location", "domain", "preferences"],
-        additionalProperties: false,
-      },
-    },
-    required: ["answers"],
-    additionalProperties: false,
-  },
-};
-
-function buildPrompt(args: {
-  state: unknown;
-  questions: Record<string, SystemOneQuestion>;
-}): string {
-  return [
-    "Evaluate the candidate's fit for the job using the supplied scoring dimensions.",
-    "Score every dimension from 0 to 4 and confidence from 0 to 1.",
-    "Use only evidence in the candidate and job data. Treat missing information as unknown.",
-    "Return only the JSON object required by the response schema; do not include explanations.",
-    JSON.stringify({ state: args.state, questions: args.questions }),
-  ].join("\n\n");
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function parseOpenRouterResponse(value: unknown): SystemOneResponse {
+function parseDecisionsResponse(value: unknown): SystemOneResponse {
   if (!isRecord(value) || !isRecord(value.answers)) {
     throw new SystemOneRequestError(
-      "OpenRouter returned an invalid Jev response",
+      "OpenRouter returned an invalid Jev decisions response",
     );
   }
 
@@ -127,11 +84,12 @@ function parseOpenRouterResponse(value: unknown): SystemOneResponse {
   for (const [key, answer] of Object.entries(value.answers)) {
     if (
       !isRecord(answer) ||
+      answer.type !== "score" ||
       typeof answer.score !== "number" ||
       !Number.isFinite(answer.score)
     ) {
       throw new SystemOneRequestError(
-        `OpenRouter returned an invalid Jev answer for ${key}`,
+        `OpenRouter returned an invalid Jev decisions answer for ${key}`,
       );
     }
     answers[key] = {
@@ -143,7 +101,16 @@ function parseOpenRouterResponse(value: unknown): SystemOneResponse {
     };
   }
 
-  return { model: JEV_MODEL, answers };
+  return {
+    model: typeof value.model === "string" ? value.model : JEV_MODEL,
+    answers,
+    ...(typeof value.id === "string" ? { request_id: value.id } : {}),
+    ...(isRecord(value.usage) ? { usage: value.usage } : {}),
+  };
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
 }
 
 export async function evaluateSystemOne(args: {
@@ -153,51 +120,68 @@ export async function evaluateSystemOne(args: {
   jobId?: string;
   signal?: AbortSignal;
 }): Promise<SystemOneResponse> {
+  const runtime = await resolveLlmRuntimeSettings("scoring");
+  if (runtime.provider !== "openrouter") {
+    throw new SystemOneConfigurationError(
+      `Jev scoring requires OpenRouter; scoring is configured for ${runtime.provider ?? "no provider"}`,
+    );
+  }
+  if (!runtime.apiKey) throw new SystemOneConfigurationError();
+
   const model = args.model ?? JEV_MODEL;
   const startedAt = Date.now();
-  const llm = await createConfiguredLlmService("scoring");
-  if (llm.getProvider() !== "openrouter") {
-    throw new SystemOneConfigurationError(
-      `Jev scoring requires OpenRouter; scoring is configured for ${llm.getProvider()}`,
-    );
-  }
-  const result = await llm.callJson<OpenRouterJevResponse>({
-    model,
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are Jev, a calibrated job-fit scoring model. Produce numeric scores only.",
-      },
-      {
-        role: "user",
-        content: buildPrompt({ state: args.state, questions: args.questions }),
-      },
-    ],
-    jsonSchema: JEV_RESPONSE_SCHEMA,
-    maxRetries: 2,
-    retryDelayMs: 100,
-    jobId: args.jobId,
-    signal: args.signal,
-  });
+  const url = joinUrl(
+    runtime.baseUrl || DEFAULT_OPENROUTER_BASE_URL,
+    DECISIONS_PATH,
+  );
 
-  if (!result.success) {
-    if (result.error === "LLM API key not configured") {
-      throw new SystemOneConfigurationError();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: buildHeaders({
+          apiKey: runtime.apiKey,
+          provider: "openrouter",
+        }),
+        body: JSON.stringify({
+          model,
+          state: args.state,
+          questions: args.questions,
+        }),
+        signal: args.signal,
+      });
+
+      if (response.ok) {
+        const result = parseDecisionsResponse(await response.json());
+        logger.info("OpenRouter Jev decisions evaluation completed", {
+          jobId: args.jobId,
+          model,
+          durationMs: Date.now() - startedAt,
+          answerCount: Object.keys(result.answers).length,
+        });
+        return result;
+      }
+
+      if (!isRetryableStatus(response.status) || attempt === 2) {
+        throw new SystemOneRequestError(
+          `OpenRouter Jev decisions request failed with status ${response.status}`,
+          response.status,
+        );
+      }
+    } catch (error) {
+      if (error instanceof SystemOneRequestError) {
+        if (!isRetryableStatus(error.status ?? 0) || attempt === 2) {
+          throw error;
+        }
+      } else if (attempt === 2) {
+        throw new SystemOneRequestError(
+          `OpenRouter Jev decisions request failed: ${error instanceof Error ? error.message : "unknown error"}`,
+        );
+      }
     }
-    const status = Number(result.error.match(/LLM API error: (\d+)/)?.[1]);
-    throw new SystemOneRequestError(
-      `OpenRouter Jev request failed: ${result.error}`,
-      Number.isFinite(status) ? status : undefined,
-    );
+
+    await wait(100 * 2 ** attempt);
   }
 
-  const response = parseOpenRouterResponse(result.data);
-  logger.info("OpenRouter Jev evaluation completed", {
-    jobId: args.jobId,
-    model,
-    durationMs: Date.now() - startedAt,
-    answerCount: Object.keys(response.answers).length,
-  });
-  return response;
+  throw new SystemOneRequestError("OpenRouter Jev decisions request failed");
 }
