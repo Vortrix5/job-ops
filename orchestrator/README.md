@@ -44,7 +44,7 @@ orchestrator/
    OpenRouter is the default LLM provider, but OpenAI, Claude (Anthropic), GLM, LM Studio, Ollama, `openai-compatible` endpoints, and Gemini are also supported.
 
    Use `LLM_API_KEY` / `llmApiKey` to configure providers that require an API key.
-   Suitability scoring currently uses TypeSafe Jev 1.13 through OpenRouter; set `OPENROUTER_API_KEY` or `LLM_API_KEY` in `.env`.
+   Suitability scoring currently uses TypeSafe Jev 1.13 through OpenRouter; configure an OpenRouter key in Settings → Integrations or set `OPENROUTER_API_KEY` / `LLM_API_KEY` in `.env`.
    To use the native OpenAI integration, set `LLM_PROVIDER=openai`.
    To use Claude through Anthropic's native Messages API, set `LLM_PROVIDER=anthropic`.
    To use GLM through Z.AI, set `LLM_PROVIDER=glm`; the default base URL is `https://api.z.ai/api/paas/v4`.

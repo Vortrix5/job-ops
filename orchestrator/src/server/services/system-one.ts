@@ -1,7 +1,6 @@
 import { logger } from "@infra/logger";
-import { resolveLlmApiKey } from "@server/services/llm/credentials";
-import { LlmService } from "@server/services/llm/service";
 import type { JsonSchemaDefinition } from "@server/services/llm/types";
+import { createConfiguredLlmService } from "@server/services/modelSelection";
 
 export const JEV_MODEL = "typesafe/jev-1.13";
 export const JEV_SCORING_VERSION = "openrouter-typesafe-jev-1.13-scoring-v1";
@@ -154,12 +153,14 @@ export async function evaluateSystemOne(args: {
   jobId?: string;
   signal?: AbortSignal;
 }): Promise<SystemOneResponse> {
-  const apiKey = resolveLlmApiKey({ provider: "openrouter" });
-  if (!apiKey) throw new SystemOneConfigurationError();
-
   const model = args.model ?? JEV_MODEL;
   const startedAt = Date.now();
-  const llm = new LlmService({ provider: "openrouter", apiKey });
+  const llm = await createConfiguredLlmService("scoring");
+  if (llm.getProvider() !== "openrouter") {
+    throw new SystemOneConfigurationError(
+      `Jev scoring requires OpenRouter; scoring is configured for ${llm.getProvider()}`,
+    );
+  }
   const result = await llm.callJson<OpenRouterJevResponse>({
     model,
     messages: [
@@ -181,6 +182,9 @@ export async function evaluateSystemOne(args: {
   });
 
   if (!result.success) {
+    if (result.error === "LLM API key not configured") {
+      throw new SystemOneConfigurationError();
+    }
     const status = Number(result.error.match(/LLM API error: (\d+)/)?.[1]);
     throw new SystemOneRequestError(
       `OpenRouter Jev request failed: ${result.error}`,
