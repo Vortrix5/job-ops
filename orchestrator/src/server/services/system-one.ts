@@ -1,9 +1,10 @@
 import { logger } from "@infra/logger";
-import { getOriginalEnvValue } from "@server/services/envSettings";
+import { resolveLlmApiKey } from "@server/services/llm/credentials";
+import { LlmService } from "@server/services/llm/service";
+import type { JsonSchemaDefinition } from "@server/services/llm/types";
 
-export const JEV_MODEL = "jev-1.13";
-export const JEV_SCORING_VERSION = "jev-1.13-scoring-v1";
-const SYSTEM_ONE_URL = "https://api.typesafe.ai/v1/systemone";
+export const JEV_MODEL = "typesafe/jev-1.13";
+export const JEV_SCORING_VERSION = "openrouter-typesafe-jev-1.13-scoring-v1";
 
 export type SystemOneQuestion =
   | {
@@ -47,7 +48,7 @@ export type SystemOneResponse = {
 };
 
 export class SystemOneConfigurationError extends Error {
-  constructor(message = "TypeSafe API key not configured") {
+  constructor(message = "OpenRouter API key not configured") {
     super(message);
     this.name = "SystemOneConfigurationError";
   }
@@ -67,22 +68,83 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function parseResponse(value: unknown): SystemOneResponse {
-  if (!isRecord(value) || !isRecord(value.answers)) {
-    throw new SystemOneRequestError("TypeSafe returned an invalid response");
-  }
+type OpenRouterJevResponse = {
+  answers: Record<string, { score: number; confidence: number }>;
+};
 
-  for (const answer of Object.values(value.answers)) {
-    if (!isRecord(answer) || typeof answer.type !== "string") {
-      throw new SystemOneRequestError("TypeSafe returned an invalid answer");
-    }
-  }
+const JEV_RESPONSE_SCHEMA: JsonSchemaDefinition = {
+  name: "jev_suitability_scores",
+  schema: {
+    type: "object",
+    properties: {
+      answers: {
+        type: "object",
+        properties: Object.fromEntries(
+          ["skills", "experience", "location", "domain", "preferences"].map(
+            (key) => [
+              key,
+              {
+                type: "object",
+                properties: {
+                  score: { type: "number", minimum: 0, maximum: 4 },
+                  confidence: { type: "number", minimum: 0, maximum: 1 },
+                },
+                required: ["score", "confidence"],
+                additionalProperties: false,
+              },
+            ],
+          ),
+        ),
+        required: ["skills", "experience", "location", "domain", "preferences"],
+        additionalProperties: false,
+      },
+    },
+    required: ["answers"],
+    additionalProperties: false,
+  },
+};
 
-  return value as unknown as SystemOneResponse;
+function buildPrompt(args: {
+  state: unknown;
+  questions: Record<string, SystemOneQuestion>;
+}): string {
+  return [
+    "Evaluate the candidate's fit for the job using the supplied scoring dimensions.",
+    "Score every dimension from 0 to 4 and confidence from 0 to 1.",
+    "Use only evidence in the candidate and job data. Treat missing information as unknown.",
+    "Return only the JSON object required by the response schema; do not include explanations.",
+    JSON.stringify({ state: args.state, questions: args.questions }),
+  ].join("\n\n");
 }
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function parseOpenRouterResponse(value: unknown): SystemOneResponse {
+  if (!isRecord(value) || !isRecord(value.answers)) {
+    throw new SystemOneRequestError(
+      "OpenRouter returned an invalid Jev response",
+    );
+  }
+
+  const answers: Record<string, SystemOneAnswer> = {};
+  for (const [key, answer] of Object.entries(value.answers)) {
+    if (
+      !isRecord(answer) ||
+      typeof answer.score !== "number" ||
+      !Number.isFinite(answer.score)
+    ) {
+      throw new SystemOneRequestError(
+        `OpenRouter returned an invalid Jev answer for ${key}`,
+      );
+    }
+    answers[key] = {
+      type: "score",
+      score: answer.score,
+      ...(typeof answer.confidence === "number"
+        ? { confidence: answer.confidence }
+        : {}),
+    };
+  }
+
+  return { model: JEV_MODEL, answers };
 }
 
 export async function evaluateSystemOne(args: {
@@ -92,63 +154,46 @@ export async function evaluateSystemOne(args: {
   jobId?: string;
   signal?: AbortSignal;
 }): Promise<SystemOneResponse> {
-  const apiKey = getOriginalEnvValue("TYPESAFE_API_KEY")?.trim();
+  const apiKey = resolveLlmApiKey({ provider: "openrouter" });
   if (!apiKey) throw new SystemOneConfigurationError();
 
   const model = args.model ?? JEV_MODEL;
   const startedAt = Date.now();
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const response = await fetch(SYSTEM_ONE_URL, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          state: args.state,
-          model,
-          questions: args.questions,
-        }),
-        signal: args.signal,
-      });
+  const llm = new LlmService({ provider: "openrouter", apiKey });
+  const result = await llm.callJson<OpenRouterJevResponse>({
+    model,
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are Jev, a calibrated job-fit scoring model. Produce numeric scores only.",
+      },
+      {
+        role: "user",
+        content: buildPrompt({ state: args.state, questions: args.questions }),
+      },
+    ],
+    jsonSchema: JEV_RESPONSE_SCHEMA,
+    maxRetries: 2,
+    retryDelayMs: 100,
+    jobId: args.jobId,
+    signal: args.signal,
+  });
 
-      if (response.ok) {
-        const result = parseResponse(await response.json());
-        logger.info("TypeSafe System One evaluation completed", {
-          jobId: args.jobId,
-          model,
-          durationMs: Date.now() - startedAt,
-          answerCount: Object.keys(result.answers).length,
-        });
-        return result;
-      }
-
-      const retryable = response.status === 429 || response.status === 529;
-      if (!retryable || attempt === 2) {
-        throw new SystemOneRequestError(
-          `TypeSafe API request failed with status ${response.status}`,
-          response.status,
-        );
-      }
-    } catch (error) {
-      if (
-        error instanceof SystemOneRequestError &&
-        error.status !== 429 &&
-        error.status !== 529
-      ) {
-        throw error;
-      }
-      if (attempt === 2) {
-        if (error instanceof SystemOneRequestError) throw error;
-        throw new SystemOneRequestError(
-          `TypeSafe API request failed: ${error instanceof Error ? error.message : "unknown error"}`,
-        );
-      }
-    }
-
-    await wait(100 * 2 ** attempt);
+  if (!result.success) {
+    const status = Number(result.error.match(/LLM API error: (\d+)/)?.[1]);
+    throw new SystemOneRequestError(
+      `OpenRouter Jev request failed: ${result.error}`,
+      Number.isFinite(status) ? status : undefined,
+    );
   }
 
-  throw new SystemOneRequestError("TypeSafe API request failed");
+  const response = parseOpenRouterResponse(result.data);
+  logger.info("OpenRouter Jev evaluation completed", {
+    jobId: args.jobId,
+    model,
+    durationMs: Date.now() - startedAt,
+    answerCount: Object.keys(response.answers).length,
+  });
+  return response;
 }

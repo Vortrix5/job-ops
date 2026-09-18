@@ -1,5 +1,5 @@
 /**
- * Service for scoring job suitability with TypeSafe Jev.
+ * Service for scoring job suitability with TypeSafe Jev through OpenRouter.
  */
 
 import { logger } from "@infra/logger";
@@ -22,7 +22,7 @@ export { JEV_SCORING_VERSION } from "./system-one";
 
 export class LlmNotConfiguredError extends Error {
   constructor(message?: string) {
-    super(message ?? "TypeSafe API key not configured");
+    super(message ?? "OpenRouter API key not configured");
     this.name = "LlmNotConfiguredError";
   }
 }
@@ -305,7 +305,7 @@ export async function scoreJobSuitability(
         error: error.message,
       });
       throw new LlmNotConfiguredError(
-        `Jev scoring failed: ${error.message}. Set TYPESAFE_API_KEY, then resume scoring.`,
+        `Jev scoring failed: ${error.message}. Set OPENROUTER_API_KEY or LLM_API_KEY, then resume scoring.`,
       );
     }
 

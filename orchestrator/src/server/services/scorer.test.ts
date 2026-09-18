@@ -70,7 +70,7 @@ describe("Jev scoring", () => {
     );
     expect(result.confidence).toBe(0.8);
     expect(JSON.parse(result.breakdown)).toMatchObject({
-      model: "jev-1.13",
+      model: "typesafe/jev-1.13",
       version: JEV_SCORING_VERSION,
       weightedScore: 60,
     });
@@ -78,7 +78,7 @@ describe("Jev scoring", () => {
 
   it("sends one Jev request with sanitized state and five score questions", async () => {
     evaluateSystemOneMock.mockResolvedValue({
-      model: "jev-1.13",
+      model: "typesafe/jev-1.13",
       answers: answers({
         skills: 4,
         experience: 4,
@@ -101,7 +101,7 @@ describe("Jev scoring", () => {
 
     expect(evaluateSystemOneMock).toHaveBeenCalledTimes(1);
     const request = evaluateSystemOneMock.mock.calls[0][0];
-    expect(request.model).toBe("jev-1.13");
+    expect(request.model).toBe("typesafe/jev-1.13");
     expect(request.questions).toEqual(
       expect.objectContaining({
         skills: expect.objectContaining({ type: "score" }),
@@ -140,7 +140,7 @@ describe("Jev scoring", () => {
       missingSalaryPenalty: { value: 10 },
     });
     evaluateSystemOneMock.mockResolvedValue({
-      model: "jev-1.13",
+      model: "typesafe/jev-1.13",
       answers: answers({
         skills: 4,
         experience: 4,
