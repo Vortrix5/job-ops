@@ -179,6 +179,18 @@ const pipelineRunsHasConfigSnapshot = tableHasColumn(
 const pipelineRunsHasTenantId = tableHasColumn("pipeline_runs", "tenant_id");
 const jobsHasPdfRegenerating = tableHasColumn("jobs", "pdf_regenerating");
 const jobsHasJobBrief = tableHasColumn("jobs", "job_brief");
+const jobsHasSuitabilityConfidence = tableHasColumn(
+  "jobs",
+  "suitability_confidence",
+);
+const jobsHasSuitabilityBreakdown = tableHasColumn(
+  "jobs",
+  "suitability_breakdown",
+);
+const jobsHasSuitabilityScoringVersion = tableHasColumn(
+  "jobs",
+  "suitability_scoring_version",
+);
 const watchlistJobStatesHasUserId = tableHasColumn(
   "watchlist_job_states",
   "user_id",
@@ -319,6 +331,9 @@ const migrations = [
     closed_at INTEGER,
     suitability_score REAL,
     suitability_reason TEXT,
+    suitability_confidence REAL,
+    suitability_breakdown TEXT,
+    suitability_scoring_version TEXT,
     job_brief TEXT,
     tailored_summary TEXT,
     tailored_headline TEXT,
@@ -844,6 +859,9 @@ const migrations = [
   `ALTER TABLE jobs ADD COLUMN sponsor_match_score REAL`,
   `ALTER TABLE jobs ADD COLUMN sponsor_match_names TEXT`,
   `ALTER TABLE jobs ADD COLUMN job_brief TEXT`,
+  `ALTER TABLE jobs ADD COLUMN suitability_confidence REAL`,
+  `ALTER TABLE jobs ADD COLUMN suitability_breakdown TEXT`,
+  `ALTER TABLE jobs ADD COLUMN suitability_scoring_version TEXT`,
 
   // Add application tracking columns
   `ALTER TABLE jobs ADD COLUMN outcome TEXT`,
@@ -961,6 +979,9 @@ const migrations = [
     closed_at INTEGER,
     suitability_score REAL,
     suitability_reason TEXT,
+    suitability_confidence REAL,
+    suitability_breakdown TEXT,
+    suitability_scoring_version TEXT,
     job_brief TEXT,
     tailored_summary TEXT,
     tailored_headline TEXT,
@@ -989,7 +1010,7 @@ const migrations = [
     company_revenue, company_description, skills, experience_range, company_rating, company_reviews_count,
     vacancy_count, work_from_home_type, title, employer, employer_url, job_url, application_link, disciplines,
     deadline, salary, location, location_evidence, degree_required, starting, job_description, status, outcome, closed_at,
-    suitability_score, suitability_reason, job_brief, tailored_summary, tailored_headline, tailored_skills,
+    suitability_score, suitability_reason, suitability_confidence, suitability_breakdown, suitability_scoring_version, job_brief, tailored_summary, tailored_headline, tailored_skills,
     selected_project_ids, pdf_path, pdf_source, pdf_regenerating, pdf_fingerprint, pdf_generated_at, tracer_links_enabled, sponsor_match_score, sponsor_match_names, discovered_at, processed_at,
     ready_at,
     applied_at, created_at, updated_at
@@ -1001,7 +1022,7 @@ const migrations = [
     company_revenue, company_description, skills, experience_range, company_rating, company_reviews_count,
     vacancy_count, work_from_home_type, title, employer, employer_url, job_url, application_link, disciplines,
     deadline, salary, location, location_evidence, degree_required, starting, job_description, status, outcome, closed_at,
-    suitability_score, suitability_reason, ${jobsHasJobBrief ? "job_brief" : "NULL"}, tailored_summary, tailored_headline, tailored_skills,
+    suitability_score, suitability_reason, ${jobsHasSuitabilityConfidence ? "suitability_confidence" : "NULL"}, ${jobsHasSuitabilityBreakdown ? "suitability_breakdown" : "NULL"}, ${jobsHasSuitabilityScoringVersion ? "suitability_scoring_version" : "NULL"}, ${jobsHasJobBrief ? "job_brief" : "NULL"}, tailored_summary, tailored_headline, tailored_skills,
     selected_project_ids, pdf_path, pdf_source, ${jobsHasPdfRegenerating ? "pdf_regenerating" : "0"}, pdf_fingerprint, pdf_generated_at, tracer_links_enabled, sponsor_match_score, sponsor_match_names, discovered_at, processed_at,
     ready_at,
     applied_at, created_at, updated_at

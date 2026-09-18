@@ -226,6 +226,9 @@ export async function executeJobActionForJob(
       reason,
       jobBrief,
       jobUpdates = {},
+      suitabilityConfidence,
+      suitabilityBreakdown,
+      suitabilityScoringVersion,
     } = await scoreJobSuitability(job, profile);
 
     const updated = await jobsRepo.updateJob(job.id, {
@@ -233,6 +236,9 @@ export async function executeJobActionForJob(
       suitabilityScore: score,
       suitabilityReason: reason,
       jobBrief,
+      suitabilityConfidence,
+      suitabilityBreakdown,
+      suitabilityScoringVersion,
     });
     if (!updated) {
       throw new AppError({

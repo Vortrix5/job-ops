@@ -24,6 +24,7 @@ vi.mock("@server/services/scorer", () => {
   class ScoringUnavailableError extends Error {}
   return {
     scoreJobSuitability: vi.fn(),
+    JEV_SCORING_VERSION: "jev-1.13-scoring-v1",
     LlmNotConfiguredError,
     ScoringUnavailableError,
   };
@@ -141,40 +142,17 @@ describe("scoreJobsStep auto-skip behavior", () => {
     expect(vi.mocked(scorer.scoreJobSuitability).mock.calls[0]).toHaveLength(2);
   });
 
-  it("persists generated job briefs while scoring", async () => {
+  it("persists Jev metadata and clears generated briefs", async () => {
     const jobsRepo = await import("@server/repositories/jobs");
     const scorer = await import("@server/services/scorer");
 
     vi.mocked(scorer.scoreJobSuitability).mockResolvedValue({
       score: 40,
       reason: "Low fit",
-      jobBrief:
-        '{"role_summary":"Build tools","they_want":[],"specifics":[],"company_offers":[],"practical_details":[],"missing_or_unclear":[],"repeated_signals":[]}',
-    });
-
-    await scoreJobsStep({ profile: {} });
-
-    expect(jobsRepo.updateJob).toHaveBeenCalledWith(
-      "job-1",
-      expect.objectContaining({
-        jobBrief:
-          '{"role_summary":"Build tools","they_want":[],"specifics":[],"company_offers":[],"practical_details":[],"missing_or_unclear":[],"repeated_signals":[]}',
-      }),
-    );
-  });
-
-  it("persists accepted job fact updates while scoring", async () => {
-    const jobsRepo = await import("@server/repositories/jobs");
-    const scorer = await import("@server/services/scorer");
-
-    vi.mocked(scorer.scoreJobSuitability).mockResolvedValue({
-      score: 75,
-      reason: "Good fit",
       jobBrief: null,
-      jobUpdates: {
-        salaryInterval: "hourly",
-        salarySource: "ai_job_fact_review",
-      },
+      suitabilityConfidence: 0.7,
+      suitabilityBreakdown: '{"skills":{"score":2}}',
+      suitabilityScoringVersion: "jev-1.13-scoring-v1",
     });
 
     await scoreJobsStep({ profile: {} });
@@ -182,8 +160,10 @@ describe("scoreJobsStep auto-skip behavior", () => {
     expect(jobsRepo.updateJob).toHaveBeenCalledWith(
       "job-1",
       expect.objectContaining({
-        salaryInterval: "hourly",
-        salarySource: "ai_job_fact_review",
+        jobBrief: null,
+        suitabilityConfidence: 0.7,
+        suitabilityBreakdown: '{"skills":{"score":2}}',
+        suitabilityScoringVersion: "jev-1.13-scoring-v1",
       }),
     );
   });

@@ -14,6 +14,7 @@ import type {
   PipelineRunSavedDetails,
 } from "@shared/types";
 import { getEffectiveSettings } from "../services/settings";
+import { JEV_MODEL } from "../services/system-one";
 
 type SnapshotLocationIntent = NonNullable<PipelineConfig["locationIntent"]>;
 
@@ -109,7 +110,7 @@ function buildEffectiveConfigSnapshot(args: {
     autoSkipScoreThreshold: args.settings.autoSkipScoreThreshold.value,
     pdfRenderer: args.settings.pdfRenderer.value,
     models: {
-      scorer: args.settings.modelScorer.value,
+      scorer: JEV_MODEL,
       tailoring: args.settings.modelTailoring.value,
       projectSelection: args.settings.modelProjectSelection.value,
     },

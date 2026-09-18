@@ -4,7 +4,6 @@ import * as settingsRepo from "../repositories/settings";
 import { getCurrentAccountEntitlements } from "./account-entitlements";
 import { resolveLlmModel, resolveLlmRuntimeSettings } from "./modelSelection";
 import { pickProjectIdsForJob } from "./projectSelection";
-import { scoreJobSuitability } from "./scorer";
 import { getEffectiveSettings } from "./settings";
 import { generateTailoring } from "./summary";
 
@@ -171,86 +170,6 @@ describe("Model Selection Logic", () => {
   afterEach(() => {
     process.env = originalEnv;
     vi.restoreAllMocks();
-  });
-
-  describe("Scoring Service", () => {
-    it("should use scoring specific model when set", async () => {
-      vi.mocked(getEffectiveSettings).mockResolvedValue({
-        model: {
-          value: "global-model",
-          default: "global-model",
-          override: null,
-        },
-        modelScorer: {
-          value: "specific-scorer-model",
-          override: "specific-scorer-model",
-        },
-        modelTailoring: { value: "global-model", override: null },
-        modelProjectSelection: { value: "global-model", override: null },
-        llmProvider: {
-          value: "openrouter",
-          default: "openrouter",
-          override: null,
-        },
-        llmBaseUrl: {
-          value: "https://openrouter.ai/api/v1",
-          default: "https://openrouter.ai/api/v1",
-          override: null,
-        },
-        scoringInstructions: { value: "", default: "", override: null },
-        penalizeMissingSalary: { value: false, default: false, override: null },
-        missingSalaryPenalty: { value: 10, default: 10, override: null },
-      } as any);
-
-      await scoreJobSuitability(
-        { title: "Test Job", jobDescription: "desc" } as any,
-        {},
-      );
-
-      const fetchCall = vi.mocked(fetch).mock.calls[0];
-      const body = JSON.parse(fetchCall[1]?.body as string);
-      expect(body.model).toBe("specific-scorer-model");
-    });
-
-    it("should fall back to global model for scoring when specific not set", async () => {
-      vi.mocked(getEffectiveSettings).mockResolvedValue({
-        model: {
-          value: "global-model",
-          default: "global-model",
-          override: "global-model",
-        },
-        modelScorer: { value: "global-model", override: null },
-        modelTailoring: { value: "global-model", override: null },
-        modelProjectSelection: { value: "global-model", override: null },
-        llmProvider: {
-          value: "openrouter",
-          default: "openrouter",
-          override: null,
-        },
-        llmBaseUrl: {
-          value: "https://openrouter.ai/api/v1",
-          default: "https://openrouter.ai/api/v1",
-          override: null,
-        },
-        scoringInstructions: { value: "", default: "", override: null },
-        penalizeMissingSalary: { value: false, default: false, override: null },
-        missingSalaryPenalty: { value: 10, default: 10, override: null },
-      } as any);
-
-      await scoreJobSuitability({ title: "Test Job" } as any, {});
-
-      const fetchCall = vi.mocked(fetch).mock.calls[0];
-      const body = JSON.parse(fetchCall[1]?.body as string);
-      expect(body.model).toBe("global-model");
-    });
-
-    it("should fall back to env model for scoring when no settings set", async () => {
-      await scoreJobSuitability({ title: "Test Job" } as any, {});
-
-      const fetchCall = vi.mocked(fetch).mock.calls[0];
-      const body = JSON.parse(fetchCall[1]?.body as string);
-      expect(body.model).toBe("env-model");
-    });
   });
 
   describe("Tailoring Service", () => {

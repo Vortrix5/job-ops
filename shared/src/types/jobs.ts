@@ -200,8 +200,11 @@ export interface Job {
   status: JobStatus;
   outcome: JobOutcome | null;
   closedAt: number | null;
-  suitabilityScore: number | null; // 0-100 AI-generated score
-  suitabilityReason: string | null; // AI explanation
+  suitabilityScore: number | null; // 0-100 suitability score
+  suitabilityReason: string | null; // Deterministic summary of score dimensions
+  suitabilityConfidence: number | null;
+  suitabilityBreakdown: string | null; // JSON score dimensions and confidence
+  suitabilityScoringVersion: string | null;
   jobBrief: string | null; // Generated JD brief (JSON)
   tailoredSummary: string | null; // Generated resume summary
   tailoredHeadline: string | null; // Generated resume headline
@@ -564,6 +567,9 @@ export interface UpdateJobInput {
   locationEvidence?: JobLocationEvidence | null;
   suitabilityScore?: number | null;
   suitabilityReason?: string;
+  suitabilityConfidence?: number | null;
+  suitabilityBreakdown?: string | null;
+  suitabilityScoringVersion?: string | null;
   jobBrief?: string | null;
   tailoredSummary?: string;
   tailoredHeadline?: string;

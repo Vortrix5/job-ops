@@ -1,37 +1,32 @@
 /**
- * Service for scoring job suitability using AI.
+ * Service for scoring job suitability with TypeSafe Jev.
  */
 
 import { logger } from "@infra/logger";
-import { getDefaultPromptTemplate } from "@shared/prompt-template-definitions.js";
-import type { Job, JobBrief, UpdateJobInput } from "@shared/types";
+import type { Job, UpdateJobInput } from "@shared/types";
 import { stripHtmlTags } from "@shared/utils/string";
 import { withHostedUsageReservation } from "./hosted-usage";
-import {
-  type JobFactPatch,
-  PATCHABLE_JOB_FIELDS,
-  validateAndApplyJobPatches,
-} from "./job-fact-patches";
-import { isConfigurationFailure } from "./llm/policies/configuration-error";
-import type { JsonSchemaDefinition } from "./llm/types";
-import { stripMarkdownCodeFences } from "./llm/utils/json";
-import { createConfiguredLlmService, resolveLlmModel } from "./modelSelection";
-import { renderPromptTemplate } from "./prompt-templates";
 import { filterProfileProjectsForAi } from "./resumeProjects";
 import { getEffectiveSettings } from "./settings";
+import {
+  evaluateSystemOne,
+  JEV_MODEL,
+  JEV_SCORING_VERSION,
+  type SystemOneAnswer,
+  SystemOneConfigurationError,
+  type SystemOneQuestion,
+  SystemOneRequestError,
+} from "./system-one";
+
+export { JEV_SCORING_VERSION } from "./system-one";
 
 export class LlmNotConfiguredError extends Error {
   constructor(message?: string) {
-    super(message ?? "LLM API key not configured");
+    super(message ?? "TypeSafe API key not configured");
     this.name = "LlmNotConfiguredError";
   }
 }
 
-/**
- * A scoring attempt failed for a reason that is not a configuration problem —
- * a transient provider fault, an unusable completion, an outage. The job can
- * simply be scored again later; the user's settings need no attention.
- */
 export class ScoringUnavailableError extends Error {
   constructor(message: string) {
     super(message);
@@ -39,182 +34,91 @@ export class ScoringUnavailableError extends Error {
   }
 }
 
-interface SuitabilityResult {
-  score: number | null; // 0-100, or null when scoring failed
-  reason: string; // Explanation
+export interface SuitabilityResult {
+  score: number | null;
+  reason: string;
   jobBrief: string | null;
   jobUpdates?: UpdateJobInput;
+  suitabilityConfidence?: number | null;
+  suitabilityBreakdown?: string | null;
+  suitabilityScoringVersion?: string;
 }
-
-type ScoringPreferences = {
-  instructions: string;
-  promptTemplate: string;
-};
 
 type ProfileRecord = Record<string, unknown>;
 
-/** JSON schema for suitability scoring response */
-const SCORING_SCHEMA: JsonSchemaDefinition = {
-  name: "job_suitability_score",
-  schema: {
-    type: "object",
-    properties: {
-      score: {
-        type: "integer",
-        minimum: 0,
-        maximum: 100,
-        description: "Suitability score from 0 to 100",
-      },
-      reason: {
-        type: "string",
-        description: "Brief 1-2 sentence explanation of the score",
-      },
-      jobBrief: {
-        type: "object",
-        properties: {
-          role_summary: {
-            type: "string",
-            description: "One sentence summarizing what the person would do",
-          },
-          they_want: {
-            type: "array",
-            maxItems: 6,
-            items: { type: "string" },
-          },
-          specifics: {
-            type: "array",
-            maxItems: 18,
-            items: { type: "string" },
-          },
-          company_offers: {
-            type: "array",
-            maxItems: 5,
-            items: { type: "string" },
-          },
-          practical_details: {
-            type: "array",
-            maxItems: 8,
-            items: { type: "string" },
-          },
-          missing_or_unclear: {
-            type: "array",
-            maxItems: 5,
-            items: { type: "string" },
-          },
-          repeated_signals: {
-            type: "array",
-            maxItems: 5,
-            items: { type: "string" },
-          },
-        },
-        required: [
-          "role_summary",
-          "they_want",
-          "specifics",
-          "company_offers",
-          "practical_details",
-          "missing_or_unclear",
-          "repeated_signals",
-        ],
-        additionalProperties: false,
-      },
-      jobPatches: {
-        type: "array",
-        maxItems: PATCHABLE_JOB_FIELDS.length,
-        items: {
-          type: "object",
-          properties: {
-            field: { type: "string", enum: [...PATCHABLE_JOB_FIELDS] },
-            value: {
-              anyOf: [
-                { type: "string" },
-                { type: "number" },
-                { type: "boolean" },
-              ],
-            },
-            confidence: {
-              type: "string",
-              enum: ["high", "medium", "low"],
-            },
-            evidence: { type: "string" },
-          },
-          required: ["field", "value", "confidence", "evidence"],
-          additionalProperties: false,
-        },
-      },
-      jobWarnings: {
-        type: "array",
-        maxItems: 10,
-        items: { type: "string" },
-      },
-    },
-    required: ["score", "reason", "jobBrief", "jobPatches", "jobWarnings"],
-    additionalProperties: false,
+const DIMENSIONS = [
+  {
+    key: "skills",
+    label: "Skills",
+    weight: 30,
+    instructions:
+      "How well do the candidate's demonstrated skills match the required skills and responsibilities?",
+    criteria: [
+      "No relevant skills or evidence",
+      "Few relevant skills; major gaps",
+      "Some relevant skills; meaningful gaps remain",
+      "Most required skills are demonstrated",
+      "Strong direct match across the required skills",
+    ],
   },
-};
-
-const SCORING_OUTPUT_INSTRUCTIONS = `
-Perform these tasks in one response:
-1. JOB FACT REVIEW (candidate-independent): compare JOB DATA with the original listing. Use only those sources, never the candidate profile. Propose a patch only for a missing or clearly incorrect whitelisted field with an exact supporting listing excerpt. Do not guess, infer from general knowledge, estimate, annualise compensation, or paraphrase/invent evidence. Use high confidence for clear corrections; medium may only fill missing values; omit ambiguous corrections. Candidate evaluation must use the proposed corrected facts.
-2. JOB BRIEF: use only stated job information, remain neutral, remove employer fluff, never judge candidate fit, and use "Not stated" for missing practical details.
-3. CANDIDATE EVALUATION: score the candidate against the listing, corrected facts, and scoring instructions.
-
-Patchable fields: ${PATCHABLE_JOB_FIELDS.join(", ")}.
-Value conventions: salaryInterval is hourly|daily|weekly|monthly|yearly; salary amounts and vacancyCount are numbers without annualisation; salaryCurrency is a 3-letter code; isRemote is boolean; workFromHomeType is remote|hybrid|onsite; all other patch values are strings. Return only changed fields. Put unsupported distinctions or explicit contradictions that cannot be represented safely in jobWarnings.
-
-Respond with ONLY valid JSON in this exact shape:
-{
-  "score": <integer 0-100>,
-  "reason": "<1-2 sentence explanation>",
-  "jobBrief": {
-    "role_summary": "<one sentence describing what the person would do>",
-    "they_want": ["<up to 6 stated requirements>"],
-    "specifics": ["<up to 18 concrete tools, responsibilities, domain or working-pattern details>"],
-    "company_offers": ["<up to 5 concrete offerings>"],
-    "practical_details": ["<up to 8 key-value details such as Salary: Not stated>"],
-    "missing_or_unclear": ["<up to 5 important missing details>"],
-    "repeated_signals": ["<up to 5 repeated themes>"]
+  {
+    key: "experience",
+    label: "Experience",
+    weight: 25,
+    instructions:
+      "How well does the candidate's demonstrated experience match the role's seniority, scope, and responsibilities?",
+    criteria: [
+      "No relevant experience or clear seniority mismatch",
+      "Limited relevant experience; major scope mismatch",
+      "Partially aligned experience or seniority",
+      "Experience and seniority are mostly aligned",
+      "Strong direct match in experience, scope, and seniority",
+    ],
   },
-  "jobPatches": [{"field":"<whitelisted field>","value":<string|number|boolean>,"confidence":"high|medium|low","evidence":"<exact listing excerpt>"}],
-  "jobWarnings": ["<unrepresentable or contradictory stated fact>"]
-}
-No markdown, code fences, or text outside the JSON.`.trim();
+  {
+    key: "location",
+    label: "Location",
+    weight: 15,
+    instructions:
+      "How well do the job's location and work pattern fit the candidate's stated location and preferences? Treat unstated information as unknown, not as a rejection.",
+    criteria: [
+      "Known hard conflict with location or work pattern",
+      "Likely conflict with limited evidence of compatibility",
+      "Unclear or partly compatible location/work pattern",
+      "Mostly compatible location/work pattern",
+      "Clearly compatible location/work pattern or remote role",
+    ],
+  },
+  {
+    key: "domain",
+    label: "Domain",
+    weight: 15,
+    instructions:
+      "How well does the candidate's industry, product, and technical domain experience fit the job?",
+    criteria: [
+      "No relevant domain evidence",
+      "Little relevant domain evidence",
+      "Some transferable domain experience",
+      "Relevant domain experience is evident",
+      "Strong direct domain match",
+    ],
+  },
+  {
+    key: "preferences",
+    label: "Preferences",
+    weight: 15,
+    instructions:
+      "How well does the job fit the candidate's stated career direction and preferences, including role type and practical constraints?",
+    criteria: [
+      "Conflicts with stated career direction or hard preferences",
+      "Several preference conflicts",
+      "Mixed or mostly unknown preference fit",
+      "Mostly aligned with stated preferences",
+      "Strongly aligned with stated career direction and preferences",
+    ],
+  },
+] as const;
 
-const NON_SOURCE_JOB_FIELDS = new Set<keyof Job>([
-  "id",
-  "locationMatch",
-  "status",
-  "outcome",
-  "closedAt",
-  "suitabilityScore",
-  "suitabilityReason",
-  "jobBrief",
-  "tailoredSummary",
-  "tailoredHeadline",
-  "tailoredSkills",
-  "selectedProjectIds",
-  "pdfPath",
-  "pdfSource",
-  "pdfRegenerating",
-  "pdfFreshness",
-  "pdfFingerprint",
-  "pdfGeneratedAt",
-  "tracerLinksEnabled",
-  "sponsorMatchScore",
-  "sponsorMatchNames",
-  "appliedDuplicateMatch",
-  "discoveredAt",
-  "processedAt",
-  "readyAt",
-  "appliedAt",
-  "createdAt",
-  "updatedAt",
-]);
-
-/**
- * Check if a job's salary field is missing/empty.
- * Returns true for null, empty string, or whitespace-only strings.
- */
 function isSalaryMissing(job: Job): boolean {
   return (
     !job.salary?.trim() &&
@@ -223,28 +127,19 @@ function isSalaryMissing(job: Job): boolean {
   );
 }
 
-/**
- * Apply salary penalty to a score if enabled.
- * Returns the adjusted score, adjusted reason, and whether penalty was applied.
- */
 function applySalaryPenalty(
   job: Job,
   originalScore: number,
   originalReason: string,
   settings: { penalizeMissingSalary: boolean; missingSalaryPenalty: number },
-): { score: number; reason: string; penaltyApplied: boolean } {
+): { score: number; reason: string } {
   if (!settings.penalizeMissingSalary || !isSalaryMissing(job)) {
-    return {
-      score: originalScore,
-      reason: originalReason,
-      penaltyApplied: false,
-    };
+    return { score: originalScore, reason: originalReason };
   }
 
   const penalty = settings.missingSalaryPenalty;
   const adjustedScore = Math.max(0, originalScore - penalty);
-  const penaltyText = `Score reduced by ${penalty} points due to missing salary information.`;
-  const adjustedReason = `${originalReason} ${penaltyText}`;
+  const reason = `${originalReason} Score reduced by ${penalty} points due to missing salary information.`;
 
   logger.info("Applied salary penalty", {
     jobId: job.id,
@@ -253,13 +148,120 @@ function applySalaryPenalty(
     finalScore: adjustedScore,
   });
 
-  return { score: adjustedScore, reason: adjustedReason, penaltyApplied: true };
+  return { score: adjustedScore, reason };
 }
 
-/**
- * Score a job's suitability based on profile and job description.
- * Includes retry logic for when AI returns garbage responses.
- */
+function buildJobState(job: Job): Record<string, unknown> {
+  return {
+    title: job.title,
+    employer: job.employer,
+    location: job.location,
+    salary: job.salary,
+    disciplines: job.disciplines,
+    degreeRequired: job.degreeRequired,
+    starting: job.starting,
+    jobDescription: stripHtmlTags(job.jobDescription ?? "") || null,
+    jobType: job.jobType,
+    jobLevel: job.jobLevel,
+    jobFunction: job.jobFunction,
+    skills: job.skills,
+    experienceRange: job.experienceRange,
+    companyIndustry: job.companyIndustry,
+    isRemote: job.isRemote,
+    workFromHomeType: job.workFromHomeType,
+  };
+}
+
+function buildQuestions(): Record<string, SystemOneQuestion> {
+  return Object.fromEntries(
+    DIMENSIONS.map((dimension) => [
+      dimension.key,
+      {
+        type: "score",
+        instructions: dimension.instructions,
+        criteria: [...dimension.criteria],
+      },
+    ]),
+  ) as Record<string, SystemOneQuestion>;
+}
+
+function scoreAnswer(
+  answers: Record<string, SystemOneAnswer>,
+  key: string,
+): { score: number; confidence: number | null } {
+  const answer = answers[key];
+  if (!answer || answer.type !== "score" || !Number.isFinite(answer.score)) {
+    throw new ScoringUnavailableError(
+      `Jev returned an invalid ${key} suitability score`,
+    );
+  }
+
+  return {
+    score: Math.min(4, Math.max(0, answer.score)),
+    confidence:
+      typeof answer.confidence === "number" &&
+      Number.isFinite(answer.confidence)
+        ? Math.min(1, Math.max(0, answer.confidence))
+        : null,
+  };
+}
+
+export function composeJevScore(answers: Record<string, SystemOneAnswer>): {
+  score: number;
+  reason: string;
+  confidence: number | null;
+  breakdown: string;
+} {
+  const dimensions = DIMENSIONS.map((dimension) => ({
+    ...dimension,
+    answer: scoreAnswer(answers, dimension.key),
+  }));
+  const weightedScore = dimensions.reduce(
+    (total, dimension) =>
+      total + (dimension.weight * dimension.answer.score) / 4,
+    0,
+  );
+  const confidences = dimensions
+    .map((dimension) => dimension.answer.confidence)
+    .filter((confidence): confidence is number => confidence !== null);
+  const confidence =
+    confidences.length > 0
+      ? confidences.reduce((total, value) => total + value, 0) /
+        confidences.length
+      : null;
+
+  const reason = dimensions
+    .map(
+      (dimension) => `${dimension.label}: ${fitLabel(dimension.answer.score)}`,
+    )
+    .join("; ");
+  const breakdown = JSON.stringify({
+    model: JEV_MODEL,
+    version: JEV_SCORING_VERSION,
+    weightedScore,
+    confidence,
+    dimensions: Object.fromEntries(
+      dimensions.map((dimension) => [dimension.key, dimension.answer]),
+    ),
+  });
+
+  return {
+    score: Math.min(100, Math.max(0, Math.round(weightedScore))),
+    reason,
+    confidence,
+    breakdown,
+  };
+}
+
+function fitLabel(score: number): string {
+  if (score >= 3.5) return "excellent";
+  if (score >= 2.5) return "strong";
+  if (score >= 1.5) return "moderate";
+  if (score >= 0.5) return "weak";
+  return "poor";
+}
+
+/** Score a job's suitability using one Jev call with five atomic dimensions. */
 export async function scoreJobSuitability(
   job: Job,
   profile: Record<string, unknown>,
@@ -275,92 +277,52 @@ export async function scoreJobSuitability(
     }));
   }
 
-  const [model, settings, aiProfile] = await Promise.all([
-    resolveLlmModel("scoring"),
+  const [settings, aiProfile] = await Promise.all([
     getEffectiveSettings(),
     filterProfileProjectsForAi(profile),
   ]);
-  const scoringInstructions = Object.hasOwn(options, "scoringInstructions")
-    ? (options.scoringInstructions ?? "")
-    : (settings.scoringInstructions?.value ?? "");
 
-  const prompt = buildScoringPrompt(job, sanitizeProfileForPrompt(aiProfile), {
-    instructions: scoringInstructions,
-    promptTemplate:
-      settings.scoringPromptTemplate?.value ??
-      getDefaultPromptTemplate("scoringPromptTemplate"),
-  });
-
-  const llm = await createConfiguredLlmService("scoring");
-  const result = await llm.callJson<{
-    score: number;
-    reason: string;
-    jobBrief?: JobBrief;
-    jobPatches?: JobFactPatch[];
-    jobWarnings?: string[];
-  }>({
-    model,
-    messages: [{ role: "user", content: prompt }],
-    jsonSchema: SCORING_SCHEMA,
-    maxRetries: 2,
-    jobId: job.id,
-  });
-
-  if (!result.success) {
-    if (isConfigurationFailure(result.error)) {
-      logger.warn("Scoring failed — pausing pipeline", {
+  let response: Awaited<ReturnType<typeof evaluateSystemOne>>;
+  try {
+    response = await evaluateSystemOne({
+      state: {
+        candidate: sanitizeProfileForPrompt(aiProfile),
+        job: buildJobState(job),
+        scoringInstructions: options.scoringInstructions?.trim() || null,
+      },
+      questions: buildQuestions(),
+      model: JEV_MODEL,
+      jobId: job.id,
+    });
+  } catch (error) {
+    if (
+      error instanceof SystemOneConfigurationError ||
+      (error instanceof SystemOneRequestError &&
+        (error.status === 401 || error.status === 403))
+    ) {
+      logger.warn("Jev scoring unavailable — pausing pipeline", {
         jobId: job.id,
-        error: result.error,
+        error: error.message,
       });
       throw new LlmNotConfiguredError(
-        `AI scoring failed: ${result.error}. Check your LLM configuration in Settings → Integrations, then resume scoring.`,
+        `Jev scoring failed: ${error.message}. Set TYPESAFE_API_KEY, then resume scoring.`,
       );
     }
-    logger.warn("Scoring failed", {
-      jobId: job.id,
-      error: result.error,
-    });
-    throw new ScoringUnavailableError(`AI scoring failed: ${result.error}`);
-  }
 
-  const { score, reason } = result.data;
-
-  // Validate we got a reasonable response
-  if (typeof score !== "number" || Number.isNaN(score)) {
-    logger.warn("Invalid score in AI response", {
+    logger.warn("Jev scoring failed", {
       jobId: job.id,
+      error: error instanceof Error ? error.message : "unknown error",
     });
     throw new ScoringUnavailableError(
-      "AI returned invalid scoring data (no numeric score in the response)",
+      `Jev scoring failed: ${error instanceof Error ? error.message : "unknown error"}`,
     );
   }
 
-  const clampedScore = Math.min(100, Math.max(0, Math.round(score)));
-  const clampedReason = reason || "No explanation provided";
-  const patchResult = validateAndApplyJobPatches(
-    job,
-    result.data.jobPatches ?? [],
-  );
-
-  if (patchResult.accepted.length > 0 || patchResult.rejected.length > 0) {
-    logger.info("Reviewed AI job fact patches", {
-      jobId: job.id,
-      accepted: patchResult.accepted,
-      rejected: patchResult.rejected,
-    });
-  }
-  if (result.data.jobWarnings?.length) {
-    logger.warn("AI job fact review warnings", {
-      jobId: job.id,
-      warnings: result.data.jobWarnings,
-    });
-  }
-
-  // Apply salary penalty if enabled
+  const composed = composeJevScore(response.answers);
   const penaltyResult = applySalaryPenalty(
-    patchResult.patchedJob,
-    clampedScore,
-    clampedReason,
+    job,
+    composed.score,
+    composed.reason,
     {
       penalizeMissingSalary: settings.penalizeMissingSalary.value,
       missingSalaryPenalty: settings.missingSalaryPenalty.value,
@@ -370,142 +332,12 @@ export async function scoreJobSuitability(
   return {
     score: penaltyResult.score,
     reason: penaltyResult.reason,
-    jobBrief:
-      job.jobDescription?.trim() && result.data.jobBrief
-        ? JSON.stringify(result.data.jobBrief)
-        : null,
-    jobUpdates: patchResult.updates,
+    jobBrief: null,
+    jobUpdates: {},
+    suitabilityConfidence: composed.confidence,
+    suitabilityBreakdown: composed.breakdown,
+    suitabilityScoringVersion: JEV_SCORING_VERSION,
   };
-}
-
-/**
- * Robustly parse JSON from AI-generated content.
- * Handles common AI quirks: markdown fences, extra text, trailing commas, etc.
- *
- * @deprecated Use LlmService with structured outputs instead. Kept for backwards compatibility with tests.
- */
-export function parseJsonFromContent(
-  content: string,
-  jobId?: string,
-): { score?: number; reason?: string } {
-  const originalContent = content;
-  let candidate = content.trim();
-
-  // Step 1: Remove markdown code fences (with or without language specifier)
-  candidate = stripMarkdownCodeFences(candidate);
-
-  // Step 2: Try to extract JSON object if there's surrounding text
-  const jsonMatch = candidate.match(/\{[\s\S]*\}/);
-  if (jsonMatch) {
-    candidate = jsonMatch[0];
-  }
-
-  // Step 3: Try direct parse first
-  try {
-    return JSON.parse(candidate);
-  } catch {
-    // Continue with sanitization
-  }
-
-  // Step 4: Fix common JSON issues
-  let sanitized = candidate;
-
-  // Remove JavaScript-style comments (// and /* */)
-  sanitized = sanitized.replace(/\/\/[^\n]*/g, "");
-  sanitized = sanitized.replace(/\/\*[\s\S]*?\*\//g, "");
-
-  // Remove trailing commas before } or ]
-  sanitized = sanitized.replace(/,\s*([\]}])/g, "$1");
-
-  // Fix unquoted keys: word: -> "word":
-  // Be more careful - only match at start of object or after comma
-  sanitized = sanitized.replace(
-    /([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g,
-    '$1"$2":',
-  );
-
-  // Fix single quotes to double quotes
-  sanitized = sanitized.replace(/'/g, '"');
-
-  // Remove ALL control characters (including newlines/tabs INSIDE string values which break JSON)
-  // First, let's normalize the string - escape actual newlines inside strings
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: needed to fix broken JSON from AI
-  const controlCharsRegex = /[\x00-\x1F\x7F]/g;
-  sanitized = sanitized.replace(controlCharsRegex, (match) => {
-    if (match === "\n") return "\\n";
-    if (match === "\r") return "\\r";
-    if (match === "\t") return "\\t";
-    return "";
-  });
-
-  // Step 5: Try parsing the sanitized version
-  try {
-    return JSON.parse(sanitized);
-  } catch {
-    // Continue with more aggressive extraction
-  }
-
-  // Step 6: Even more aggressive - try to rebuild a minimal valid JSON
-  // by extracting just the score and reason values
-  const scoreMatch = originalContent.match(
-    /["']?score["']?\s*[:=]\s*(\d+(?:\.\d+)?)/i,
-  );
-  const reasonMatch =
-    originalContent.match(/["']?reason["']?\s*[:=]\s*["']([^"'\n]+)["']/i) ||
-    originalContent.match(
-      /["']?reason["']?\s*[:=]\s*["']?(.*?)["']?\s*[,}\n]/is,
-    );
-
-  if (scoreMatch) {
-    const score = Math.round(parseFloat(scoreMatch[1]));
-    const reason = reasonMatch
-      ? reasonMatch[1].trim().replace(controlCharsRegex, "")
-      : "Score extracted from malformed response";
-    logger.warn("Parsed score via regex fallback", {
-      jobId: jobId || "unknown",
-      score,
-    });
-    return { score, reason };
-  }
-
-  // Log the failure with full content for debugging
-  logger.error("Failed to parse AI response", {
-    jobId: jobId || "unknown",
-    rawSample: originalContent.substring(0, 500),
-    sanitizedSample: sanitized.substring(0, 500),
-  });
-
-  throw new Error("Unable to parse JSON from model response");
-}
-
-function buildScoringPrompt(
-  job: Job,
-  profile: Record<string, unknown>,
-  preferences: ScoringPreferences,
-): string {
-  const jobDescription = stripHtmlTags(job.jobDescription ?? "") || null;
-  const jobJson = JSON.stringify({
-    ...Object.fromEntries(
-      Object.entries(job).filter(
-        ([key]) => !NON_SOURCE_JOB_FIELDS.has(key as keyof Job),
-      ),
-    ),
-    jobDescription,
-  });
-
-  return `${renderPromptTemplate(preferences.promptTemplate, {
-    profileJson: JSON.stringify(profile),
-    jobTitle: job.title,
-    employer: job.employer,
-    location: job.location || "Not specified",
-    salary: job.salary || "Not specified",
-    degreeRequired: job.degreeRequired || "Not specified",
-    disciplines: job.disciplines || "Not specified",
-    jobDescription: jobDescription || "No description available",
-    scoringInstructionsText: preferences.instructions
-      ? preferences.instructions
-      : "No additional custom scoring instructions.",
-  })}\n\nJOB DATA (JSON):\n${jobJson}\n\n${SCORING_OUTPUT_INSTRUCTIONS}`;
 }
 
 function sanitizeProfileForPrompt(
@@ -618,9 +450,7 @@ function collectSectionItems(
 
   if (isRecord(section)) {
     if (!isVisibleCvItem(section)) return [];
-    if (Array.isArray(section.items)) {
-      return section.items.filter(isRecord);
-    }
+    if (Array.isArray(section.items)) return section.items.filter(isRecord);
   }
 
   const topLevelSection = profile[sectionKey];
@@ -665,18 +495,13 @@ function pickDefined(source: ProfileRecord, keys: string[]): ProfileRecord {
 }
 
 function isVisibleCvItem(item: ProfileRecord): boolean {
-  if (item.hidden === true) return false;
-  if (item.visible === false) return false;
-  return true;
+  return item.hidden !== true && item.visible !== false;
 }
 
 function isRecord(value: unknown): value is ProfileRecord {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-/**
- * Score multiple jobs and return sorted by score (descending).
- */
 export async function scoreAndRankJobs(
   jobs: Job[],
   profile: Record<string, unknown>,

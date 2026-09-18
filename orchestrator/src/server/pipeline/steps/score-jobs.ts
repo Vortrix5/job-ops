@@ -2,6 +2,7 @@ import { logger } from "@infra/logger";
 import * as jobsRepo from "@server/repositories/jobs";
 import * as settingsRepo from "@server/repositories/settings";
 import {
+  JEV_SCORING_VERSION,
   LlmNotConfiguredError,
   ScoringUnavailableError,
   scoreJobSuitability,
@@ -67,7 +68,8 @@ export async function scoreJobsStep(args: {
 
       const hasCachedScore =
         typeof job.suitabilityScore === "number" &&
-        !Number.isNaN(job.suitabilityScore);
+        !Number.isNaN(job.suitabilityScore) &&
+        job.suitabilityScoringVersion === JEV_SCORING_VERSION;
 
       if (hasCachedScore) {
         if ((job.suitabilityScore as number) > 90) exceptional += 1;
@@ -132,7 +134,15 @@ export async function scoreJobsStep(args: {
         );
         return;
       }
-      const { score, reason, jobBrief, jobUpdates = {} } = scoringResult;
+      const {
+        score,
+        reason,
+        jobBrief,
+        jobUpdates = {},
+        suitabilityConfidence,
+        suitabilityBreakdown,
+        suitabilityScoringVersion,
+      } = scoringResult;
       if (args.shouldCancel?.()) return;
 
       let sponsorMatchScore = 0;
@@ -164,6 +174,9 @@ export async function scoreJobsStep(args: {
         suitabilityScore: score,
         suitabilityReason: reason,
         jobBrief,
+        suitabilityConfidence: suitabilityConfidence ?? null,
+        suitabilityBreakdown: suitabilityBreakdown ?? null,
+        suitabilityScoringVersion: suitabilityScoringVersion ?? null,
         sponsorMatchScore,
         sponsorMatchNames,
         ...(shouldAutoSkip ? { status: "skipped" } : {}),
@@ -195,6 +208,10 @@ export async function scoreJobsStep(args: {
         ...jobUpdates,
         suitabilityScore: score,
         suitabilityReason: reason,
+        suitabilityConfidence: suitabilityConfidence ?? null,
+        suitabilityBreakdown: suitabilityBreakdown ?? null,
+        suitabilityScoringVersion:
+          suitabilityScoringVersion ?? JEV_SCORING_VERSION,
       });
     },
   });

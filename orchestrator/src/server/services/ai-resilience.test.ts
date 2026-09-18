@@ -10,12 +10,17 @@ const settingsMocks = vi.hoisted(() => ({
   getAllSettings: vi.fn().mockResolvedValue({}),
   getEffectiveSettings: vi.fn(),
 }));
+const systemOneMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../repositories/settings", () => settingsMocks);
 vi.mock("@server/repositories/settings", () => settingsMocks);
 vi.mock("@server/services/settings", () => ({
   getEffectiveSettings: settingsMocks.getEffectiveSettings,
 }));
+vi.mock("./system-one", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./system-one")>();
+  return { ...actual, evaluateSystemOne: systemOneMock };
+});
 
 function effectiveSettings(raw: Record<string, unknown>) {
   return {
@@ -69,85 +74,30 @@ describe("AI Service Resilience", () => {
     vi.restoreAllMocks();
   });
 
-  describe("scoreJobSuitability (Scorer)", () => {
-    it("should return parsed score when API returns valid JSON", async () => {
-      const mockResponse = {
-        ok: true,
-        json: async () => ({
-          choices: [
-            {
-              message: {
-                content: JSON.stringify({ score: 85, reason: "Great match" }),
-              },
-            },
-          ],
-        }),
-      };
-      vi.mocked(global.fetch).mockResolvedValue(mockResponse as any);
+  describe("scoreJobSuitability (Jev)", () => {
+    it("returns the weighted score from native Jev answers", async () => {
+      systemOneMock.mockResolvedValue({
+        model: "jev-1.13",
+        answers: Object.fromEntries(
+          ["skills", "experience", "location", "domain", "preferences"].map(
+            (key) => [key, { type: "score", score: 3.4, confidence: 0.9 }],
+          ),
+        ),
+      });
 
       const result = await scoreJobSuitability(mockJob, mockProfile);
 
       expect(result.score).toBe(85);
-      expect(result.reason).toBe("Great match");
-    });
-
-    it("should throw LlmNotConfiguredError if API Key is missing", async () => {
-      delete process.env.OPENROUTER_API_KEY;
-      vi.mocked(settingsRepo.getAllSettings).mockResolvedValue({});
-
-      // Should NOT call fetch
-      await expect(scoreJobSuitability(mockJob, mockProfile)).rejects.toThrow(
-        "LLM API key not configured",
-      );
+      expect(result.suitabilityConfidence).toBe(0.9);
       expect(global.fetch).not.toHaveBeenCalled();
     });
 
-    it("should throw ScoringUnavailableError on API 5xx errors", async () => {
-      vi.mocked(global.fetch).mockResolvedValue({
-        ok: false,
-        status: 500,
-        statusText: "Internal Server Error",
-      } as any);
+    it("turns native provider failures into retryable scoring failures", async () => {
+      systemOneMock.mockRejectedValue(new Error("upstream unavailable"));
 
       await expect(scoreJobSuitability(mockJob, mockProfile)).rejects.toThrow(
-        "AI scoring failed",
+        "Jev scoring failed: upstream unavailable",
       );
-    });
-
-    it("should throw ScoringUnavailableError on Malformed/Invalid JSON in API response", async () => {
-      const mockResponse = {
-        ok: true,
-        json: async () => ({
-          choices: [
-            { message: { content: "This is not JSON at all, just text." } },
-          ],
-        }),
-      };
-      vi.mocked(global.fetch).mockResolvedValue(mockResponse as any);
-
-      await expect(scoreJobSuitability(mockJob, mockProfile)).rejects.toThrow(
-        "AI scoring failed",
-      );
-    });
-
-    it("should extract JSON from markdown code blocks", async () => {
-      const mockResponse = {
-        ok: true,
-        json: async () => ({
-          choices: [
-            {
-              message: {
-                content:
-                  'Here is the score: ```json\n{ "score": 90, "reason": "Good" }\n```',
-              },
-            },
-          ],
-        }),
-      };
-      vi.mocked(global.fetch).mockResolvedValue(mockResponse as any);
-
-      const result = await scoreJobSuitability(mockJob, mockProfile);
-      expect(result.score).toBe(90);
     });
   });
 

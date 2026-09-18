@@ -31,9 +31,11 @@ import {
   isNull,
   lt,
   ne,
+  or,
   sql,
 } from "drizzle-orm";
 import { db, schema } from "../db/index";
+import { JEV_SCORING_VERSION } from "../services/system-one";
 import {
   getPrivateDataScope,
   privateDataScopeFilter,
@@ -799,7 +801,11 @@ export async function getUnscoredDiscoveredJobs(
       and(
         jobsScopeFilter(),
         eq(jobs.status, "discovered"),
-        isNull(jobs.suitabilityScore),
+        or(
+          isNull(jobs.suitabilityScore),
+          isNull(jobs.suitabilityScoringVersion),
+          ne(jobs.suitabilityScoringVersion, JEV_SCORING_VERSION),
+        ),
       ),
     )
     .orderBy(desc(jobs.discoveredAt));
@@ -864,6 +870,9 @@ function mapRowToJob(row: typeof jobs.$inferSelect): Job {
     closedAt: row.closedAt ?? null,
     suitabilityScore: row.suitabilityScore,
     suitabilityReason: row.suitabilityReason,
+    suitabilityConfidence: row.suitabilityConfidence ?? null,
+    suitabilityBreakdown: row.suitabilityBreakdown ?? null,
+    suitabilityScoringVersion: row.suitabilityScoringVersion ?? null,
     jobBrief: row.jobBrief ?? null,
     tailoredSummary: row.tailoredSummary,
     tailoredHeadline: row.tailoredHeadline ?? null,

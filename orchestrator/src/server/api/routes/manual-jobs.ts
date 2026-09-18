@@ -373,6 +373,9 @@ manualJobsRouter.post("/import", async (req: Request, res: Response) => {
           reason,
           jobBrief,
           jobUpdates = {},
+          suitabilityConfidence,
+          suitabilityBreakdown,
+          suitabilityScoringVersion,
         } = await scoreJobSuitability(processedJob, profile);
         await jobsRepo.updateJob(processedJob.id, {
           ...jobUpdates,
@@ -380,6 +383,9 @@ manualJobsRouter.post("/import", async (req: Request, res: Response) => {
           suitabilityScore: score,
           suitabilityReason: reason,
           jobBrief,
+          suitabilityConfidence,
+          suitabilityBreakdown,
+          suitabilityScoringVersion,
         });
       } catch (error) {
         logger.warn("Manual job scoring failed", {
