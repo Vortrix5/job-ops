@@ -46,7 +46,10 @@ import { celebrateOffer } from "@/client/lib/celebrate";
 import { showErrorToast } from "@/client/lib/error-toast";
 import { uploadJobPdfFromFile } from "@/client/lib/job-pdf-upload";
 import { getRenderableJobDescription } from "@/client/lib/jobDescription";
-import { logJobStageEvent } from "@/client/lib/logJobStageEvent";
+import {
+  logJobStageEvent,
+  markJobRejected,
+} from "@/client/lib/logJobStageEvent";
 import { resolveFilenameLanguage } from "@/client/lib/pdf-filename";
 import {
   getPdfActionLabels,
@@ -381,6 +384,14 @@ export const JobPage: React.FC = () => {
       if (!job) return;
       await markAsAppliedMutation.mutateAsync(job.id);
       toast.success("Marked as applied");
+    });
+  };
+
+  const handleMarkRejected = async () => {
+    await runAction("mark-rejected", async () => {
+      if (!job) return;
+      await markJobRejected({ jobId: job.id });
+      toast.success("Marked as rejected");
     });
   };
 
@@ -890,6 +901,7 @@ export const JobPage: React.FC = () => {
               pdfDownloadLabel={pdfLabels.download}
               onStartTailoring={() => navigate(`/jobs/discovered/${job.id}`)}
               onMarkApplied={() => void handleMarkApplied()}
+              onMarkRejected={() => void handleMarkRejected()}
               onOpenLogEvent={() => setIsLogModalOpen(true)}
               onEditTailoring={() => navigate(`/jobs/ready/${job.id}`)}
               onViewPdf={() => {

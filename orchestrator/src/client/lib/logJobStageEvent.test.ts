@@ -1,7 +1,7 @@
 import type { LogEventFormValues } from "@client/components/LogEventModal";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api";
-import { logJobStageEvent } from "./logJobStageEvent";
+import { logJobStageEvent, markJobRejected } from "./logJobStageEvent";
 
 vi.mock("../api", () => ({
   transitionJobStage: vi.fn(),
@@ -120,5 +120,26 @@ describe("logJobStageEvent", () => {
       }),
     );
     expect(api.transitionJobStage).not.toHaveBeenCalled();
+  });
+});
+
+describe("markJobRejected", () => {
+  it("closes the job with a rejected outcome", async () => {
+    await markJobRejected({
+      jobId: "job-1",
+      reasonCode: "jobs_panel_manual_stage",
+    });
+
+    expect(api.transitionJobStage).toHaveBeenCalledWith("job-1", {
+      toStage: "closed",
+      occurredAt: null,
+      metadata: {
+        actor: "user",
+        eventType: "status_update",
+        eventLabel: "Rejected",
+        reasonCode: "jobs_panel_manual_stage",
+      },
+      outcome: "rejected",
+    });
   });
 });

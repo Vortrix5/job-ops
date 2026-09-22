@@ -8,7 +8,8 @@ import * as api from "../api";
 
 export type LogJobStageEventReasonCode =
   | "job_page_manual_stage"
-  | "in_progress_board_menu";
+  | "in_progress_board_menu"
+  | "jobs_panel_manual_stage";
 
 export type LogJobStageEventParams = {
   jobId: string;
@@ -84,4 +85,32 @@ export async function logJobStageEvent({
   });
 
   return { effectiveStage, newEvent };
+}
+
+export type MarkJobRejectedParams = {
+  jobId: string;
+  occurredAt?: number | null;
+  reasonCode?: LogJobStageEventReasonCode;
+};
+
+/**
+ * Closes a job as rejected without walking it through the in-progress stages,
+ * for applications turned down straight after applying.
+ */
+export async function markJobRejected({
+  jobId,
+  occurredAt = null,
+  reasonCode = "job_page_manual_stage",
+}: MarkJobRejectedParams): Promise<StageEvent> {
+  return api.transitionJobStage(jobId, {
+    toStage: "closed",
+    occurredAt,
+    metadata: {
+      eventLabel: "Rejected",
+      reasonCode,
+      actor: "user",
+      eventType: "status_update",
+    },
+    outcome: "rejected",
+  });
 }
