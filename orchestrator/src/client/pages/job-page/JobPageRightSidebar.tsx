@@ -44,6 +44,7 @@ type JobPageRightSidebarProps = {
   pdfDownloadLabel: string;
   onStartTailoring: () => void;
   onMarkApplied: () => void;
+  onMarkRejected: () => void;
   onOpenLogEvent: () => void;
   onEditTailoring: () => void;
   onViewPdf: () => void;
@@ -75,6 +76,7 @@ export const JobPageRightSidebar: React.FC<JobPageRightSidebarProps> = ({
   pdfDownloadLabel,
   onStartTailoring,
   onMarkApplied,
+  onMarkRejected,
   onOpenLogEvent,
   onEditTailoring,
   onViewPdf,
@@ -131,6 +133,19 @@ export const JobPageRightSidebar: React.FC<JobPageRightSidebarProps> = ({
           >
             <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
             Mark Applied
+          </Button>
+        )}
+
+        {isApplied && (
+          <Button
+            size="sm"
+            className="w-full justify-start"
+            variant="outline"
+            onClick={onMarkRejected}
+            disabled={isBusy}
+          >
+            <XCircle className="mr-1.5 h-3.5 w-3.5" />
+            Mark Rejected
           </Button>
         )}
 

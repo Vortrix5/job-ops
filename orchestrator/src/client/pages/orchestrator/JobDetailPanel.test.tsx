@@ -145,6 +145,7 @@ vi.mock("@/lib/utils", async (importOriginal) => {
 
 vi.mock("@client/api", () => ({
   updateJob: vi.fn(),
+  transitionJobStage: vi.fn(),
   processJob: vi.fn(),
   generateJobPdf: vi.fn(),
   markAsApplied: vi.fn(),
@@ -657,6 +658,34 @@ describe("JobDetailPanel", () => {
     );
     expect(api.updateJob).not.toHaveBeenCalled();
     expect(onJobUpdated).not.toHaveBeenCalled();
+  });
+
+  it("marks an applied job as rejected from the menu", async () => {
+    const onJobUpdated = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(api.transitionJobStage).mockResolvedValue(undefined as any);
+
+    await renderJobDetailPanel({
+      activeTab: "all",
+      activeJobs: [],
+      selectedJob: createJob({ status: "applied" }),
+      onSelectJobId: vi.fn(),
+      onJobUpdated,
+    });
+
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: /more actions/i }),
+    );
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: /mark rejected/i }),
+    );
+
+    await waitFor(() =>
+      expect(api.transitionJobStage).toHaveBeenCalledWith(
+        "job-1",
+        expect.objectContaining({ toStage: "closed", outcome: "rejected" }),
+      ),
+    );
+    expect(onJobUpdated).toHaveBeenCalled();
   });
 
   it("skips a job from the menu", async () => {

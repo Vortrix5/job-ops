@@ -1,5 +1,5 @@
 import { createJob } from "@shared/testing/factories.js";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { JobPageRightSidebar } from "./JobPageRightSidebar";
@@ -30,7 +30,10 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
 
 const noop = vi.fn();
 
-function renderRightSidebar(overrides: Parameters<typeof createJob>[0] = {}) {
+function renderRightSidebar(
+  overrides: Parameters<typeof createJob>[0] = {},
+  handlers: { onMarkRejected?: () => void } = {},
+) {
   const job = createJob({
     status: "ready",
     pdfPath: "data/pdfs/resume_job-1.pdf",
@@ -56,6 +59,7 @@ function renderRightSidebar(overrides: Parameters<typeof createJob>[0] = {}) {
       pdfDownloadLabel="Download old PDF"
       onStartTailoring={noop}
       onMarkApplied={noop}
+      onMarkRejected={handlers.onMarkRejected ?? noop}
       onOpenLogEvent={noop}
       onEditTailoring={noop}
       onViewPdf={noop}
@@ -106,5 +110,23 @@ describe("JobPageRightSidebar actions", () => {
       screen.getAllByRole("button", { name: /upload pdf/i }).length,
     ).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: /download pdf/i })).toBeNull();
+  });
+
+  it("lets an applied job be marked rejected alongside logging an event", () => {
+    const onMarkRejected = vi.fn();
+    renderRightSidebar({ status: "applied" }, { onMarkRejected });
+
+    expect(
+      screen.getByRole("button", { name: /log event/i }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /mark rejected/i }));
+    expect(onMarkRejected).toHaveBeenCalled();
+  });
+
+  it("hides the rejection action for jobs that are not applied", () => {
+    renderRightSidebar();
+
+    expect(screen.queryByRole("button", { name: /mark rejected/i })).toBeNull();
   });
 });

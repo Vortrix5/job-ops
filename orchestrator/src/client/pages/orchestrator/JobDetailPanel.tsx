@@ -19,6 +19,7 @@ import { useProfile } from "@client/hooks/useProfile";
 import { useRescoreJob } from "@client/hooks/useRescoreJob";
 import { useSettings } from "@client/hooks/useSettings";
 import { uploadJobPdfFromFile } from "@client/lib/job-pdf-upload";
+import { markJobRejected } from "@client/lib/logJobStageEvent";
 import { resolveFilenameLanguage } from "@client/lib/pdf-filename";
 import {
   getPdfActionLabels,
@@ -295,6 +296,7 @@ export const JobDetailPanel: React.FC<JobDetailPanelProps> = ({
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("brief");
   const [isProcessing, setIsProcessing] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
+  const [isRejecting, setIsRejecting] = useState(false);
   const [isEditDetailsOpen, setIsEditDetailsOpen] = useState(false);
   const [catalog, setCatalog] = useState<ResumeProjectCatalogItem[]>([]);
   const [isUploadingPdf, setIsUploadingPdf] = useState(false);
@@ -494,6 +496,30 @@ export const JobDetailPanel: React.FC<JobDetailPanelProps> = ({
     setInspectorTab("brief");
   }, [handleMarkApplied, navigate, selectedJob]);
 
+  const handleMarkRejected = useCallback(async () => {
+    if (!selectedJob) return;
+    try {
+      setIsRejecting(true);
+      await markJobRejected({
+        jobId: selectedJob.id,
+        reasonCode: "jobs_panel_manual_stage",
+      });
+      trackProductEvent("jobs_job_action_completed", {
+        action: "mark_rejected",
+        result: "success",
+        from_status: selectedJob.status,
+        to_status: "in_progress",
+      });
+      toast.success("Marked as rejected");
+      handleJobMoved(selectedJob.id);
+      await onJobUpdated();
+    } catch (error) {
+      showErrorToast(error, "Failed to mark as rejected");
+    } finally {
+      setIsRejecting(false);
+    }
+  }, [handleJobMoved, onJobUpdated, selectedJob]);
+
   const handleJobListingOpened = useCallback(() => {
     if (!selectedJob) return;
     setOpenedListingJobIds((current) => {
@@ -678,6 +704,7 @@ export const JobDetailPanel: React.FC<JobDetailPanelProps> = ({
     isProcessing || isApplying || selectedJob.status === "processing";
   const canGenerate = ["discovered", "ready"].includes(selectedJob.status);
   const canSkip = ["discovered", "ready"].includes(selectedJob.status);
+  const canMarkRejected = selectedJob.status === "applied";
   const isRegeneratingPdf = isPdfRegenerating(selectedJob);
   const isStalePdf = isPdfStale(selectedJob);
   const pdfLabels = getPdfActionLabels(selectedJob);
@@ -830,6 +857,19 @@ export const JobDetailPanel: React.FC<JobDetailPanelProps> = ({
                     >
                       <XCircle className="mr-2 h-4 w-4" />
                       Skip job
+                    </DropdownMenuItem>
+                  </>
+                )}
+                {canMarkRejected && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onSelect={() => void handleMarkRejected()}
+                      disabled={isRejecting}
+                      className="text-destructive focus:text-destructive"
+                    >
+                      <XCircle className="mr-2 h-4 w-4" />
+                      Mark rejected
                     </DropdownMenuItem>
                   </>
                 )}
